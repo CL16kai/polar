@@ -9,17 +9,25 @@ on:
 permissions:
   contents: read
 
+# A new push to a PR replaces its running checks; every commit on master
+# keeps its own run.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Third-party actions are pinned to full commit SHAs (tag in the comment);
+# Dependabot (.github/dependabot.yml) proposes updates.
 
 jobs:
   frontend:
     name: Frontend (typecheck + build)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
       - run: bun install --frozen-lockfile
       - run: bun run build
 
@@ -30,34 +38,53 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-      # tauri-build needs ../dist to exist, and on Windows the bundled mpv
-      # files listed in tauri.windows.conf.json (fetch-mpv is a no-op on macOS).
-      - run: bun install --frozen-lockfile
-      - run: bunx vite build
-      - run: bun scripts/fetch-mpv.ts
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Debug builds (tests, clippy) don't embed the frontend, so no `dist` is
+      # needed. On Windows tauri-build does need the bundled mpv files listed in
+      # tauri.windows.conf.json; macOS loads an installed libmpv at runtime.
+      - name: Cache bundled mpv
+        if: runner.os == 'Windows'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: src-tauri/vendor/mpv
+          key: mpv-${{ runner.os }}-${{ hashFiles('scripts/fetch-mpv.ts') }}
+      - if: runner.os == 'Windows'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - name: Fetch bundled mpv
+        if: runner.os == 'Windows'
+        run: bun scripts/fetch-mpv.ts
       - run: cargo test --workspace --locked
       - run: cargo build -p polar-index --features server --locked
-      # Advisory until the existing code is clippy-clean; then drop
-      # continue-on-error so new warnings fail the build.
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # Advisory, and on one platform only (the code is nearly all shared):
+      # lists every warning without failing the job. Once the code is clean,
+      # add `-- -D warnings` and drop continue-on-error so new warnings fail.
+      - name: Clippy (advisory)
+        if: matrix.os == 'windows-latest'
+        run: cargo clippy --workspace --all-targets --locked
         continue-on-error: true
 
   fmt:
     name: Rust formatting
     runs-on: ubuntu-latest
-    # Advisory until `cargo fmt --all` has been run once over the codebase.
-    continue-on-error: true
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           components: rustfmt
-      - run: cargo fmt --all --check
+      # Advisory until `cargo fmt --all` has been run once over the codebase.
+      # On the step, not the job: a job-level continue-on-error still marks
+      # the check as failed on every PR.
+      - name: rustfmt (advisory)
+        run: cargo fmt --all --check
+        continue-on-error: true
